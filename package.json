@@ -1,0 +1,43 @@
+{
+	"name": "pi-todos",
+	"version": "1.0.0",
+	"description": "File-backed todo tool for the pi coding agent — durable Markdown todo files with pid-locking, garbage collection, compaction re-injection, and single-flight auto-promotion.",
+	"keywords": ["pi-package", "todo", "todos", "task-tracking"],
+	"license": "MIT",
+	"type": "module",
+	"main": "todos.ts",
+	"files": ["todos.ts", "README.md", "LICENSE", "CHANGELOG.md"],
+	"repository": {
+		"type": "git",
+		"url": "git+ssh://git@github.com/cabi/pi-todos.git"
+	},
+	"homepage": "https://github.com/cabi/pi-todos",
+	"bugs": {
+		"url": "https://github.com/cabi/pi-todos/issues"
+	},
+	"engines": {
+		"node": ">=18"
+	},
+	"scripts": {
+		"test": "node test/todos.test.mjs"
+	},
+	"pi": {
+		"extensions": ["./todos.ts"]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"peerDependenciesMeta": {
+		"@earendil-works/pi-coding-agent": {
+			"optional": true
+		},
+		"@earendil-works/pi-tui": {
+			"optional": true
+		},
+		"typebox": {
+			"optional": true
+		}
+	}
+}
