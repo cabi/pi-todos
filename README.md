@@ -5,16 +5,17 @@ A file-backed todo tool for the [pi coding agent](https://github.com/earendil-wo
 Most todo extensions keep task state in the model's context (replayed from the session log). pi-todos instead writes **one Markdown file per todo** into `.pi/todos/`. The state survives crashes, session restarts, context compaction, and handovers between sessions — and it is plain files you can read, grep, and edit yourself.
 
 ```
-.pi/todos/TODO-523169a1.md
----
-status: in_progress
-tags: [api, auth]
-created_at: 2026-10-18T09:12:44.001Z
-updated_at: 2026-10-18T09:14:02.310Z
-session: 4f1c9a2e
----
-Fix token refresh in the API layer
-
+```jsonc
+// .pi/todos/TODO-523169a1.md — one file per todo: JSON header + free Markdown body
+{
+  "id": "523169a1",
+  "title": "Fix token refresh in the API layer",
+  "tags": ["api", "auth"],
+  "status": "in_progress",
+  "created_at": "2026-10-18T09:12:44.001Z",
+  "updated_at": "2026-10-18T09:14:02.310Z",
+  "assigned_to_session": "4f1c9a2e"
+}
 The refresh endpoint 500s when the grant expired more than 24h ago …
 ```
 
@@ -90,7 +91,7 @@ Statuses: `open` → `in_progress` → `closed` (legacy aliases are normalized o
 
 ## Storage & safety
 
-- `.pi/todos/*.md` — one file per todo, JSON front matter + free Markdown body.
+- `.pi/todos/*.md` — one file per todo: JSON header (id, title, tags, status, timestamps, assignment) + free Markdown body.
 - `.pi/todos/.lock` — write lock; held by a dead pid is stolen automatically, held by a live stale process only interactively (headless runs refuse, never corrupt).
 - On session start, todos closed > 30 days are garbage-collected (`closed_at`, falling back to `created_at`).
 - Files are plain Markdown: `git add .pi/todos` if you want todo history in the repo.

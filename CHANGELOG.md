@@ -8,7 +8,7 @@ in response to a observed failure mode in benchmark runs, and the full
 v1 → v7 progression is documented in [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 - **File-backed todos** — one Markdown file per todo in `.pi/todos/`, with
-  JSON front matter (status, tags, timestamps, assignment). State survives
+  JSON header (id, title, tags, status, timestamps, assignment). State survives
   process crashes, session restarts, and context compaction; it is readable
   and editable by humans and other tools.
 - **Todo tool** (`todos`) — create / update / list / get / append / close /
