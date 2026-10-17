@@ -2,6 +2,10 @@
 
 ## 1.0.0 (2026-10-18)
 
+Derived from the `todos` extension by Armin Ronacher
+([mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)), Apache-2.0 —
+see [NOTICE.md](NOTICE.md) for the change list relative to upstream.
+
 First public release. Version 1.0.0 bundles the seventh generation of an
 extension that was developed measurement-first: every feature below was added
 in response to a observed failure mode in benchmark runs, and the full

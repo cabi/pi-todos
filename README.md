@@ -1,6 +1,8 @@
 # pi-todos
 
-A file-backed todo tool for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — durable Markdown todo files with pid-locking, garbage collection, compaction re-injection, and single-flight auto-promotion.
+*A file-backed todo tool for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — durable Markdown todo files with pid-locking, garbage collection, compaction re-injection, and single-flight auto-promotion.*
+
+**Based on the [`todos`](https://github.com/mitsuhiko/agent-stuff/blob/main/extensions/todos.ts) extension by [Armin Ronacher](https://github.com/mitsuhiko) ([agent-stuff](https://github.com/mitsuhiko/agent-stuff)), Apache-2.0 — extensively extended and benchmarked (see [Credits](#credits--license)).**
 
 Most todo extensions keep task state in the model's context (replayed from the session log). pi-todos instead writes **one Markdown file per todo** into `.pi/todos/`. The state survives crashes, session restarts, context compaction, and handovers between sessions — and it is plain files you can read, grep, and edit yourself.
 
@@ -132,6 +134,23 @@ Findings:
 - Node ≥ 18, no runtime dependencies
 - Works headless (`-a`) and interactive (TUI `/todos` browser)
 
-## License
+## Credits & License
 
-[MIT](LICENSE)
+This extension is a derivative of the **`todos` extension by Armin Ronacher**
+([`mitsuhiko/agent-stuff`](https://github.com/mitsuhiko/agent-stuff), published
+there as part of the `mitsupi` package). The core design — one Markdown file
+per todo under `.pi/todos/`, the `/todos` TUI, and the original tool surface —
+is his; the bulk of the code originates there.
+
+Distributed under the **[Apache License 2.0](LICENSE)** (upstream's license).
+Changes in this fork, developed measurement-first across seven generations
+([docs/BENCHMARK.md](docs/BENCHMARK.md)):
+
+- lean prompt surface: salient description, `promptSnippet`, "3+ steps" trigger guideline, compact list serialization, slim mutation echo, enforced status enum (~230 tokens of tool text per request, −23%)
+- `session_compact` re-injection of open todos (no more post-compaction forgetting)
+- session `claim`/`release` assignment for multi-agent work
+- pid-based write locking with dead-lock stealing (headless-safe)
+- garbage collection of todos closed > 30 days (`created_at`/`updated_at`/`closed_at` timestamps)
+- single-flight auto-promotion: closing a todo promotes the next open one to `in_progress`
+
+Modifications © 2026 cabi. See [NOTICE.md](NOTICE.md).

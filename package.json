@@ -1,12 +1,22 @@
 {
 	"name": "pi-todos",
 	"version": "1.0.0",
-	"description": "File-backed todo tool for the pi coding agent — durable Markdown todo files with pid-locking, garbage collection, compaction re-injection, and single-flight auto-promotion.",
-	"keywords": ["pi-package", "todo", "todos", "task-tracking"],
-	"license": "MIT",
+	"description": "File-backed todo tool for the pi coding agent \u2014 durable Markdown todo files with pid-locking, garbage collection, compaction re-injection, and single-flight auto-promotion.",
+	"keywords": [
+		"pi-package",
+		"todo",
+		"todos",
+		"task-tracking"
+	],
+	"license": "Apache-2.0",
 	"type": "module",
 	"main": "todos.ts",
-	"files": ["todos.ts", "README.md", "LICENSE", "CHANGELOG.md"],
+	"files": [
+		"todos.ts",
+		"README.md",
+		"LICENSE",
+		"CHANGELOG.md"
+	],
 	"repository": {
 		"type": "git",
 		"url": "git+ssh://git@github.com/cabi/pi-todos.git"
@@ -22,7 +32,9 @@
 		"test": "node test/todos.test.mjs"
 	},
 	"pi": {
-		"extensions": ["./todos.ts"]
+		"extensions": [
+			"./todos.ts"
+		]
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
@@ -39,5 +51,7 @@
 		"typebox": {
 			"optional": true
 		}
-	}
+	},
+	"author": "cabi",
+	"contributors": "Armin Ronacher \u2014 original todos extension (https://github.com/mitsuhiko/agent-stuff)"
 }

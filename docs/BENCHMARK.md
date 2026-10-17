@@ -1,5 +1,9 @@
 # Benchmark: pi-todos vs. the npm todo extensions
 
+Extension under test: `pi-todos` — a derivative of Armin Ronacher's `todos`
+extension ([mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)),
+extended through seven measured generations.
+
 Full methodology and raw numbers from the comparison project
 (`todo-comparision`, October 2026). Every generation of this extension was
 driven by a measured failure mode; this document preserves the complete
