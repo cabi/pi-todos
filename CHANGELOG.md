@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0 (2026-10-19)
+
+- **Living id errors** — every invalid or unknown todo id now returns a
+  self-recovering error instead of a bare `Invalid todo id. Expected
+  TODO-<hex>.`: the diagnosis says *why* the id failed (length or bad
+  characters), a "Did you mean" section suggests near-miss todos (edit
+  distance ≤ 2 — catches dropped, mistyped, or transposed characters) with
+  id, status, and title inline, and a roster of open todos plus the
+  `todo list` / `todo list-all` recovery hint is always appended when no
+  near match exists. Suggestions are never applied automatically; mutations
+  still require the model to re-run with the exact id.
+
 ## 1.0.0 (2026-10-18)
 
 Derived from the `todos` extension by Armin Ronacher

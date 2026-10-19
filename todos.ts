@@ -214,6 +214,88 @@ function displayTodoId(id: string): string {
 	return formatTodoId(normalizeTodoId(id));
 }
 
+/**
+ * Plain Levenshtein distance. Todo ids are ~8 chars, so the O(n·m) table is
+ * trivial; used only on id-error paths to find near-miss candidates.
+ */
+function levenshtein(a: string, b: string): number {
+	let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+	for (let i = 1; i <= a.length; i++) {
+		const curr = [i];
+		for (let j = 1; j <= b.length; j++) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+		}
+		prev = curr;
+	}
+	return prev[b.length];
+}
+
+/** Diagnose *why* an id is invalid (length vs charset), echoing the offending input. */
+function describeInvalidTodoId(id: string): string {
+	const normalized = normalizeTodoId(id);
+	if (!normalized) return `expected 8 hex characters after "TODO-", got nothing`;
+	if (normalized.length !== 8) {
+		return `expected 8 hex characters after "TODO-", got ${normalized.length} ("${normalized}")`;
+	}
+	const invalidChars = [...new Set([...normalized].filter((c) => !/[a-f0-9]/i.test(c)))];
+	return `expected 8 hex characters (0-9, a-f) after "TODO-", invalid characters: ${invalidChars.join(" ")}`;
+}
+
+/**
+ * Near-miss candidates for a failed id. Ids are random 8-hex, so two *different*
+ * todos sit ~7 edits apart — distance ≤ 2 is almost certainly the todo the model
+ * meant (dropped/mistyped char, transposition, extra/missing trailing chars).
+ */
+function suggestTodosForId(id: string, todos: TodoFrontMatter[]): TodoFrontMatter[] {
+	const needle = normalizeTodoId(id).toLowerCase();
+	if (!needle) return [];
+	return todos
+		.map((todo) => ({ todo, distance: levenshtein(needle, todo.id.toLowerCase()) }))
+		.filter((s) => s.distance <= 2)
+		.sort((a, b) => a.distance - b.distance || a.todo.id.localeCompare(b.todo.id))
+		.slice(0, 3)
+		.map((s) => s.todo);
+}
+
+/**
+ * Builds the "living" id error: diagnose the bad id, suggest near misses (never
+ * applied automatically), fall back to a roster of open todos, and always name
+ * the recovery command. Runs on the error path only — listTodos reads the store.
+ */
+async function buildTodoIdError(todosDir: string, id: string, kind: "invalid" | "not_found"): Promise<string> {
+	let todos: TodoFrontMatter[] = [];
+	try {
+		todos = await listTodos(todosDir);
+	} catch {
+		// diagnostics must never turn a clean error into a crash
+	}
+	const head =
+		kind === "invalid"
+			? `Error: invalid todo id "${id.trim()}": ${describeInvalidTodoId(id)}.`
+			: `Error: todo ${displayTodoId(id)} not found.`;
+	const lines = [head];
+	const suggestions = suggestTodosForId(id, todos);
+	if (suggestions.length) {
+		lines.push("Did you mean:");
+		for (const todo of suggestions) lines.push(`  ${serializeTodoSummary(todo)}`);
+		lines.push("Re-run with the exact id — suggestions are not applied automatically.");
+	} else {
+		const open = sortTodos(todos.filter((t) => !isTodoClosed(getTodoStatus(t))));
+		if (open.length) {
+			lines.push("Current open todos:");
+			for (const todo of open.slice(0, 5)) lines.push(`  ${serializeTodoSummary(todo)}`);
+			if (open.length > 5) lines.push(`  ... and ${open.length - 5} more`);
+		} else if (todos.length) {
+			lines.push("No open todos — only closed ones remain (todo list-all shows them).");
+		} else {
+			lines.push("The todo store is empty — create todos first (todo create).");
+		}
+	}
+	lines.push("Run todo list (open+assigned) or todo list-all (includes closed) to see all ids with titles.");
+	return lines.join("\n");
+}
+
 function isTodoClosed(status: string): boolean {
 	return ["closed", "done"].includes(status.toLowerCase());
 }
@@ -1436,12 +1518,12 @@ async function updateTodoStatus(
 ): Promise<TodoRecord | { error: string }> {
 	const validated = validateTodoId(id);
 	if ("error" in validated) {
-		return { error: validated.error };
+		return { error: await buildTodoIdError(todosDir, id, "invalid") };
 	}
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
 	if (!existsSync(filePath)) {
-		return { error: `Todo ${displayTodoId(id)} not found` };
+		return { error: await buildTodoIdError(todosDir, id, "not_found") };
 	}
 
 	const { out: result } = await closeWithPromotion(todosDir, ctx, normalizedId, () =>
@@ -1515,12 +1597,12 @@ async function claimTodoAssignment(
 ): Promise<TodoRecord | { error: string }> {
 	const validated = validateTodoId(id);
 	if ("error" in validated) {
-		return { error: validated.error };
+		return { error: await buildTodoIdError(todosDir, id, "invalid") };
 	}
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
 	if (!existsSync(filePath)) {
-		return { error: `Todo ${displayTodoId(id)} not found` };
+		return { error: await buildTodoIdError(todosDir, id, "not_found") };
 	}
 	const sessionId = ctx.sessionManager.getSessionId();
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
@@ -1558,12 +1640,12 @@ async function releaseTodoAssignment(
 ): Promise<TodoRecord | { error: string }> {
 	const validated = validateTodoId(id);
 	if ("error" in validated) {
-		return { error: validated.error };
+		return { error: await buildTodoIdError(todosDir, id, "invalid") };
 	}
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
 	if (!existsSync(filePath)) {
-		return { error: `Todo ${displayTodoId(id)} not found` };
+		return { error: await buildTodoIdError(todosDir, id, "not_found") };
 	}
 	const sessionId = ctx.sessionManager.getSessionId();
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
@@ -1598,12 +1680,12 @@ async function deleteTodo(
 ): Promise<TodoRecord | { error: string }> {
 	const validated = validateTodoId(id);
 	if ("error" in validated) {
-		return { error: validated.error };
+		return { error: await buildTodoIdError(todosDir, id, "invalid") };
 	}
 	const normalizedId = validated.id;
 	const filePath = getTodoPath(todosDir, normalizedId);
 	if (!existsSync(filePath)) {
-		return { error: `Todo ${displayTodoId(id)} not found` };
+		return { error: await buildTodoIdError(todosDir, id, "not_found") };
 	}
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
@@ -1699,9 +1781,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 					const validated = validateTodoId(params.id);
 					if ("error" in validated) {
+						const errorText = await buildTodoIdError(todosDir, params.id, "invalid");
 						return {
-							content: [{ type: "text", text: validated.error }],
-							details: { action: "get", error: validated.error },
+							content: [{ type: "text", text: errorText }],
+							details: { action: "get", error: errorText },
 						};
 					}
 					const normalizedId = validated.id;
@@ -1709,9 +1792,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 					const filePath = getTodoPath(todosDir, normalizedId);
 					const todo = await ensureTodoExists(filePath, normalizedId);
 					if (!todo) {
+						const errorText = await buildTodoIdError(todosDir, params.id, "not_found");
 						return {
-							content: [{ type: "text", text: `Todo ${displayId} not found` }],
-							details: { action: "get", error: "not found" },
+							content: [{ type: "text", text: errorText }],
+							details: { action: "get", error: errorText },
 						};
 					}
 					return {
@@ -1768,18 +1852,20 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 					const validated = validateTodoId(params.id);
 					if ("error" in validated) {
+						const errorText = await buildTodoIdError(todosDir, params.id, "invalid");
 						return {
-							content: [{ type: "text", text: validated.error }],
-							details: { action: "update", error: validated.error },
+							content: [{ type: "text", text: errorText }],
+							details: { action: "update", error: errorText },
 						};
 					}
 					const normalizedId = validated.id;
 					const displayId = formatTodoId(normalizedId);
 					const filePath = getTodoPath(todosDir, normalizedId);
 					if (!existsSync(filePath)) {
+						const errorText = await buildTodoIdError(todosDir, params.id, "not_found");
 						return {
-							content: [{ type: "text", text: `Todo ${displayId} not found` }],
-							details: { action: "update", error: "not found" },
+							content: [{ type: "text", text: errorText }],
+							details: { action: "update", error: errorText },
 						};
 					}
 				const { out: result, promo: siblingPromo } = await closeWithPromotion(todosDir, ctx, normalizedId, () =>
@@ -1826,18 +1912,20 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 					const validated = validateTodoId(params.id);
 					if ("error" in validated) {
+						const errorText = await buildTodoIdError(todosDir, params.id, "invalid");
 						return {
-							content: [{ type: "text", text: validated.error }],
-							details: { action: "append", error: validated.error },
+							content: [{ type: "text", text: errorText }],
+							details: { action: "append", error: errorText },
 						};
 					}
 					const normalizedId = validated.id;
 					const displayId = formatTodoId(normalizedId);
 					const filePath = getTodoPath(todosDir, normalizedId);
 					if (!existsSync(filePath)) {
+						const errorText = await buildTodoIdError(todosDir, params.id, "not_found");
 						return {
-							content: [{ type: "text", text: `Todo ${displayId} not found` }],
-							details: { action: "append", error: "not found" },
+							content: [{ type: "text", text: errorText }],
+							details: { action: "append", error: errorText },
 						};
 					}
 					const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
@@ -1926,9 +2014,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					const validated = validateTodoId(params.id);
 					if ("error" in validated) {
+						const errorText = await buildTodoIdError(todosDir, params.id, "invalid");
 						return {
-							content: [{ type: "text", text: validated.error }],
-							details: { action: "delete", error: validated.error },
+							content: [{ type: "text", text: errorText }],
+							details: { action: "delete", error: errorText },
 						};
 					}
 					const result = await deleteTodo(todosDir, validated.id, ctx);

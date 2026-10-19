@@ -371,5 +371,46 @@ console.log("\n== v7 auto-promotion ==");
 	}
 }
 
+
+console.log("\n== #9 living id errors: diagnose, suggest, roster, hint ==");
+{
+	fs.rmSync(todosDir, { recursive: true, force: true });
+	fs.mkdirSync(todosDir, { recursive: true });
+	const id1 = idFromSummary((await call({ action: "create", title: "LE alpha task" })).text);
+	const id2 = idFromSummary((await call({ action: "create", title: "LE beta task" })).text);
+	await sleep(25);
+
+	// A+B: dropped last char → invalid-format diagnosis + did-you-mean with the exact id
+	const short = `TODO-${id1.slice(0, 7)}`;
+	const r1 = await call({ action: "get", id: short });
+	check("invalid: diagnoses 7 chars", /Error: invalid todo id "TODO-[0-9a-f]{7}": expected 8 hex characters after "TODO-", got 7/.test(r1.text), r1.text);
+	check("invalid: suggests the exact todo", r1.text.includes("Did you mean:") && r1.text.includes(`TODO-${id1}`) && r1.text.includes("LE alpha task"), r1.text);
+	check("invalid: no auto-apply warning + hint", r1.text.includes("not applied automatically") && r1.text.includes("todo list-all"), r1.text);
+
+	// B: valid-format unknown id, far from everything → not-found + roster fallback (C) + hint (D)
+	const r2 = await call({ action: "get", id: "TODO-00112233" });
+	check("not found: head + roster", r2.text.startsWith("Error: todo TODO-00112233 not found.") && r2.text.includes("Current open todos:"), r2.text);
+	check("not found: roster lists titles", r2.text.includes("LE alpha task") && r2.text.includes("LE beta task"), r2.text);
+
+	// B: mistyped middle char (same length) → did-you-mean via edit distance
+	const flip = id1.slice(0, 4) + (id1[4] === "0" ? "1" : "0") + id1.slice(5);
+	const r3 = await call({ action: "update", id: `TODO-${flip}`, status: "closed" });
+	check("typo: suggests near miss", r3.text.includes("Did you mean:") && r3.text.includes(`TODO-${id1}`), r3.text);
+	check("typo: mutation NOT auto-applied", readTodo(id1).fm.status === "open", `status=${readTodo(id1).fm.status}`);
+
+	// A: charset diagnosis
+	const r4 = await call({ action: "get", id: "TODO-xx11yy22" });
+	check("invalid: names bad characters", /invalid characters: x y/.test(r4.text), r4.text);
+
+	// helper-routed path (claim) gets the same enrichment
+	const r5 = await call({ action: "claim", id: `TODO-${id2.slice(0, 7)}` });
+	check("claim: enriched invalid id", r5.text.includes("Did you mean:") && r5.text.includes(`TODO-${id2}`), r5.text);
+	check("claim: typo id not claimed", readTodo(id2).fm.assigned_to_session === undefined);
+
+	// C/D: empty store
+	fs.rmSync(todosDir, { recursive: true, force: true });
+	const r6 = await call({ action: "get", id: "TODO-deadbeef" });
+	check("empty store: hint to create", r6.text.includes("The todo store is empty") && r6.text.includes("todo create"), r6.text);
+}
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);
