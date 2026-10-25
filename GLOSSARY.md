@@ -10,7 +10,12 @@ workspace, overridable via `PI_TODO_PATH`). Each file is one todo named by its
 id (`TODO-<8 hex>.md`). The store is the single source of truth: every action
 reads and writes it through the same front matter format, sessions share it,
 and a fresh session reconstructs all state from it. Garbage collection
-(ancient closed todos) runs once per session at `session_start`.
+(ancient closed todos) runs once per session at `session_start`. The store is
+read through one door, `readStore`: the only place the directory is walked and
+front matter decoded into records, so listing, promotion, the TUI and garbage
+collection cannot disagree about a file's contents. `frontMatterOf` projects a
+record down to its metadata at the boundaries that must stay lean (tool-result
+details); bodies never leave the process that way.
 
 ## Front matter
 

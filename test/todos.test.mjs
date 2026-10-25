@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Functionality tests for todos.ts (77 tests: lifecycle, timestamps, GC, locks, compaction re-injection, v7 auto-promotion).
+// Functionality tests for todos.ts (82 tests: lifecycle, timestamps, GC, locks, compaction re-injection, v7 auto-promotion).
 // Transpiles the extension with tsc, loads it with a mock pi, and drives the real tool execute(). Run: node test/todos.test.mjs
 import { execSync, spawn } from "node:child_process";
 import fs from "node:fs";
@@ -492,6 +492,37 @@ console.log("\n== #9 living id errors: diagnose, suggest, roster, hint ==");
 	);
 	await pi.handlers.session_start[0]({}, { cwd: gcDir });
 	check("GC collects a legacy completed todo", !fs.existsSync(path.join(gcTodos, "bbbb0001.md")));
+}
+// ---------- #12 store door: one read, so listing and GC cannot disagree ----------
+{
+	fs.rmSync(todosDir, { recursive: true, force: true });
+	fs.mkdirSync(todosDir, { recursive: true });
+	const real = idFromSummary((await call({ action: "create", title: "door real", body: "the body text" })).text);
+	// a store entry that cannot be read at all (a directory that looks like a todo file)
+	fs.mkdirSync(path.join(todosDir, "cccccccc.md"));
+
+	const listAll = (await call({ action: "list-all" })).res;
+	check("door: unreadable entry skipped, not fatal", listAll.content[0].text.includes(`TODO-${real}`), listAll.content[0].text);
+	check(
+		"door: skipped entry absent from the listing",
+		listAll.details.todos.length === 1 && listAll.details.todos[0].id === real,
+		JSON.stringify(listAll.details.todos.map((t) => t.id)),
+	);
+	check(
+		"door: details carry the front matter, never the body",
+		listAll.details.todos.every((t) => !("body" in t)),
+		JSON.stringify(Object.keys(listAll.details.todos[0] ?? {})),
+	);
+
+	// GC goes through the same door: same skip, same tolerance
+	await pi.handlers.session_start[0]({}, { cwd: ws });
+	check(
+		"door: GC skips the same entry and keeps the store intact",
+		fs.existsSync(path.join(todosDir, `${real}.md`)) && fs.existsSync(path.join(todosDir, "cccccccc.md")),
+	);
+
+	// the body is still reachable where it belongs: a single read
+	check("door: body still reaches single reads", (await call({ action: "get", id: real })).text.includes("the body text"));
 }
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);

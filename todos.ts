@@ -311,12 +311,12 @@ function suggestTodosForId(id: string, todos: TodoFrontMatter[]): TodoFrontMatte
 /**
  * Builds the "living" id error: diagnose the bad id, suggest near misses (never
  * applied automatically), fall back to a roster of open todos, and always name
- * the recovery command. Runs on the error path only — listTodos reads the store.
+ * the recovery command. Runs on the error path only — the store read is best-effort.
  */
 async function buildTodoIdError(todosDir: string, id: string, kind: "invalid" | "not_found"): Promise<string> {
 	let todos: TodoFrontMatter[] = [];
 	try {
-		todos = await listTodos(todosDir);
+		todos = await readStore(todosDir);
 	} catch {
 		// diagnostics must never turn a clean error into a crash
 	}
@@ -369,7 +369,7 @@ function touchTodo(todo: TodoFrontMatter): void {
 	}
 }
 
-function sortTodos(todos: TodoFrontMatter[]): TodoFrontMatter[] {
+function sortTodos<T extends TodoFrontMatter>(todos: T[]): T[] {
 	return [...todos].sort((a, b) => {
 		const aClosed = isTodoClosed(a.status);
 		const bClosed = isTodoClosed(b.status);
@@ -941,38 +941,15 @@ async function readTodoSettings(todosDir: string): Promise<TodoSettings> {
 async function garbageCollectTodos(todosDir: string, settings: TodoSettings): Promise<void> {
 	if (!settings.gc) return;
 
-	let entries: string[] = [];
-	try {
-		entries = await fs.readdir(todosDir);
-	} catch {
-		return;
-	}
-
 	const cutoff = Date.now() - settings.gcDays * 24 * 60 * 60 * 1000;
-	await Promise.all(
-		entries
-			.filter((entry) => entry.endsWith(".md"))
-			.map(async (entry) => {
-				const id = entry.slice(0, -3);
-				const filePath = path.join(todosDir, entry);
-				try {
-					const content = await fs.readFile(filePath, "utf8");
-					const { frontMatter } = splitFrontMatter(content);
-					const parsed = parseFrontMatter(frontMatter, id);
-					if (!isTodoClosed(parsed.status)) return;
-					// Age is measured from closed_at; legacy files without it fall back to created_at.
-					const closedAt = parsed.closed_at ? Date.parse(parsed.closed_at) : NaN;
-					const createdAt = Date.parse(parsed.created_at);
-					const reference = Number.isFinite(closedAt) ? closedAt : createdAt;
-					if (!Number.isFinite(reference)) return;
-					if (reference < cutoff) {
-						await fs.unlink(filePath);
-					}
-				} catch {
-					// ignore unreadable todo
-				}
-			}),
-	);
+	for (const todo of await readStore(todosDir)) {
+		if (!isTodoClosed(todo.status)) continue;
+		// Age is measured from closed_at; legacy files without it fall back to created_at.
+		const closedAt = todo.closed_at ? Date.parse(todo.closed_at) : NaN;
+		const reference = Number.isFinite(closedAt) ? closedAt : Date.parse(todo.created_at);
+		if (!Number.isFinite(reference) || reference >= cutoff) continue;
+		await fs.unlink(getTodoPath(todosDir, todo.id)).catch(() => undefined);
+	}
 }
 
 function getTodoPath(todosDir: string, id: string): string {
@@ -1241,37 +1218,40 @@ async function withTodoLock<T>(
 	}
 }
 
-async function listTodos(todosDir: string): Promise<TodoFrontMatter[]> {
-	let entries: string[] = [];
+/**
+ * The store door: the one place the todo directory is walked and decoded. Everything that
+ * needs "what is in the store" reads through here, so listing, promotion and garbage
+ * collection cannot disagree about a file's contents. Unreadable files are skipped; the
+ * filename is the authoritative id. Results are sorted into display order.
+ */
+async function readStore(todosDir: string): Promise<TodoRecord[]> {
+	let entries: string[];
 	try {
 		entries = await fs.readdir(todosDir);
 	} catch {
 		return [];
 	}
 
-	const todos: TodoFrontMatter[] = [];
-	for (const entry of entries) {
-		if (!entry.endsWith(".md")) continue;
-		const id = entry.slice(0, -3);
-		const filePath = path.join(todosDir, entry);
-		try {
-			const content = await fs.readFile(filePath, "utf8");
-			const { frontMatter } = splitFrontMatter(content);
-			const parsed = parseFrontMatter(frontMatter, id);
-			todos.push({
-				id,
-				title: parsed.title,
-				tags: parsed.tags ?? [],
-				status: parsed.status,
-				created_at: parsed.created_at,
-				assigned_to_session: parsed.assigned_to_session,
-			});
-		} catch {
-			// ignore unreadable todo
-		}
-	}
+	const todos = await Promise.all(
+		entries
+			.filter((entry) => entry.endsWith(".md"))
+			.map(async (entry): Promise<TodoRecord | null> => {
+				try {
+					return await readTodoFile(path.join(todosDir, entry), entry.slice(0, -3));
+				} catch {
+					// ignore unreadable todo
+					return null;
+				}
+			}),
+	);
 
-	return sortTodos(todos);
+	return sortTodos(todos.filter((todo): todo is TodoRecord => todo !== null));
+}
+
+/** The front-matter fields only — what tool-result details carry; bodies never leave. */
+function frontMatterOf(todo: TodoRecord): TodoFrontMatter {
+	const { body: _body, ...rest } = todo;
+	return rest;
 }
 
 
@@ -1309,14 +1289,14 @@ function buildRefinePrompt(todoId: string, title: string): string {
 	);
 }
 
-function splitTodosByAssignment(todos: TodoFrontMatter[]): {
-	assignedTodos: TodoFrontMatter[];
-	openTodos: TodoFrontMatter[];
-	closedTodos: TodoFrontMatter[];
+function splitTodosByAssignment<T extends TodoFrontMatter>(todos: T[]): {
+	assignedTodos: T[];
+	openTodos: T[];
+	closedTodos: T[];
 } {
-	const assignedTodos: TodoFrontMatter[] = [];
-	const openTodos: TodoFrontMatter[] = [];
-	const closedTodos: TodoFrontMatter[] = [];
+	const assignedTodos: T[] = [];
+	const openTodos: T[] = [];
+	const closedTodos: T[] = [];
 	for (const todo of todos) {
 		if (isTodoClosed(todo.status)) {
 			closedTodos.push(todo);
@@ -1573,7 +1553,7 @@ async function promoteNextOpenTodo(
 ): Promise<{ id: string; title: string } | { skipped: string } | null> {
 	let todos: TodoFrontMatter[] = [];
 	try {
-		todos = await listTodos(todosDir);
+		todos = await readStore(todosDir);
 	} catch {
 		return null;
 	}
@@ -1733,7 +1713,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 	pi.on("session_compact", async (_event, ctx) => {
 		try {
 			const todosDir = getTodosDir(ctx.cwd);
-			const todos = await listTodos(todosDir);
+			const todos = await readStore(todosDir);
 			const open = todos.filter((t) => !isTodoClosed(t.status));
 			if (!open.length) return;
 			const lines = open.map(
@@ -1746,7 +1726,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					"set status in_progress when you start an item, closed when done.\n" +
 					lines.join("\n"),
 				display: true,
-				details: { todos: open },
+				details: { todos: open.map(frontMatterOf) },
 			});
 		} catch {
 			// never block compaction on todo state
@@ -1771,22 +1751,22 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 			switch (action) {
 				case "list": {
-					const todos = await listTodos(todosDir);
+					const todos = await readStore(todosDir);
 					const { assignedTodos, openTodos } = splitTodosByAssignment(todos);
 					const listedTodos = [...assignedTodos, ...openTodos];
 					const currentSessionId = ctx.sessionManager.getSessionId();
 					return {
 						content: [{ type: "text", text: serializeTodoListForAgent(listedTodos) }],
-						details: { action: "list", todos: listedTodos, currentSessionId },
+						details: { action: "list", todos: listedTodos.map(frontMatterOf), currentSessionId },
 					};
 				}
 
 				case "list-all": {
-					const todos = await listTodos(todosDir);
+					const todos = await readStore(todosDir);
 					const currentSessionId = ctx.sessionManager.getSessionId();
 					return {
 						content: [{ type: "text", text: serializeTodoListForAgent(todos) }],
-						details: { action: "list-all", todos, currentSessionId },
+						details: { action: "list-all", todos: todos.map(frontMatterOf), currentSessionId },
 					};
 				}
 
@@ -1984,7 +1964,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 		description: "List todos from .pi/todos",
 		handler: async (args, ctx) => {
 			const todosDir = getTodosDir(ctx.cwd);
-			const todos = await listTodos(todosDir);
+			const todos = await readStore(todosDir);
 			const currentSessionId = ctx.sessionManager.getSessionId();
 			const searchTerm = (args ?? "").trim();
 
@@ -2122,7 +2102,7 @@ let rootTui: TUI | null = null;
 							ctx.ui.notify(tuiTodoErrorMessage(result), "error");
 							return "stay";
 						}
-						const updatedTodos = await listTodos(todosDir);
+						const updatedTodos = await readStore(todosDir);
 						selector?.setTodos(updatedTodos);
 						ctx.ui.notify(`Released todo ${formatTodoId(record.id)}`, "info");
 						return "stay";
@@ -2134,7 +2114,7 @@ let rootTui: TUI | null = null;
 							ctx.ui.notify(tuiTodoErrorMessage(result), "error");
 							return "stay";
 						}
-						const updatedTodos = await listTodos(todosDir);
+						const updatedTodos = await readStore(todosDir);
 						selector?.setTodos(updatedTodos);
 						ctx.ui.notify(`Deleted todo ${formatTodoId(record.id)}`, "info");
 						return "stay";
@@ -2147,7 +2127,7 @@ let rootTui: TUI | null = null;
 						return "stay";
 					}
 
-					const updatedTodos = await listTodos(todosDir);
+					const updatedTodos = await readStore(todosDir);
 					selector?.setTodos(updatedTodos);
 					ctx.ui.notify(
 						`${action === "close" ? "Closed" : "Reopened"} todo ${formatTodoId(record.id)}`,
