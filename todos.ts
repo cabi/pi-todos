@@ -225,12 +225,11 @@ function normalizeTodoId(id: string): string {
 	return trimmed;
 }
 
-function validateTodoId(id: string): { id: string } | { error: string } {
+/** Normalize and validate a raw id; returns the canonical lowercase id or null. */
+function validateTodoId(id: string): string | null {
 	const normalized = normalizeTodoId(id);
-	if (!normalized || !TODO_ID_PATTERN.test(normalized)) {
-		return { error: "Invalid todo id. Expected TODO-<hex>." };
-	}
-	return { id: normalized.toLowerCase() };
+	if (!normalized || !TODO_ID_PATTERN.test(normalized)) return null;
+	return normalized.toLowerCase();
 }
 
 function displayTodoId(id: string): string {
@@ -1495,21 +1494,31 @@ async function closeWithPromotion<T extends { status?: string }>(
 	return { out, promo };
 }
 
+type ResolvedTodoId = { id: string; filePath: string };
+
+/**
+ * Resolve an action's id parameter: present, well-formed, and pointing at an
+ * existing todo file. Failures come back as TodoError values (id_required,
+ * invalid_id, not_found) that the caller routes through its error channel.
+ */
+function resolveTodoId(todosDir: string, rawId: string | undefined): ResolvedTodoId | TodoError {
+	if (!rawId) return { kind: "id_required" };
+	const id = validateTodoId(rawId);
+	if (id === null) return { kind: "invalid_id", id: rawId };
+	const filePath = getTodoPath(todosDir, id);
+	if (!existsSync(filePath)) return { kind: "not_found", id: rawId };
+	return { id, filePath };
+}
+
 async function updateTodoStatus(
 	todosDir: string,
 	id: string,
 	status: string,
 	ctx: ExtensionContext,
 ): Promise<TodoRecord | TodoError> {
-	const validated = validateTodoId(id);
-	if ("error" in validated) {
-		return { kind: "invalid_id", id };
-	}
-	const normalizedId = validated.id;
-	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) {
-		return { kind: "not_found", id };
-	}
+	const resolved = resolveTodoId(todosDir, id);
+	if ("kind" in resolved) return resolved;
+	const { id: normalizedId, filePath } = resolved;
 
 	const { out: result } = await closeWithPromotion(todosDir, ctx, normalizedId, () =>
 		withTodoLock(todosDir, normalizedId, ctx, async () => {
@@ -1577,15 +1586,9 @@ async function claimTodoAssignment(
 	ctx: ExtensionContext,
 	force = false,
 ): Promise<TodoRecord | TodoError> {
-	const validated = validateTodoId(id);
-	if ("error" in validated) {
-		return { kind: "invalid_id", id };
-	}
-	const normalizedId = validated.id;
-	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) {
-		return { kind: "not_found", id };
-	}
+	const resolved = resolveTodoId(todosDir, id);
+	if ("kind" in resolved) return resolved;
+	const { id: normalizedId, filePath } = resolved;
 	const sessionId = ctx.sessionManager.getSessionId();
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
@@ -1617,15 +1620,9 @@ async function releaseTodoAssignment(
 	ctx: ExtensionContext,
 	force = false,
 ): Promise<TodoRecord | TodoError> {
-	const validated = validateTodoId(id);
-	if ("error" in validated) {
-		return { kind: "invalid_id", id };
-	}
-	const normalizedId = validated.id;
-	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) {
-		return { kind: "not_found", id };
-	}
+	const resolved = resolveTodoId(todosDir, id);
+	if ("kind" in resolved) return resolved;
+	const { id: normalizedId, filePath } = resolved;
 	const sessionId = ctx.sessionManager.getSessionId();
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
@@ -1654,15 +1651,9 @@ async function deleteTodo(
 	id: string,
 	ctx: ExtensionContext,
 ): Promise<TodoRecord | TodoError> {
-	const validated = validateTodoId(id);
-	if ("error" in validated) {
-		return { kind: "invalid_id", id };
-	}
-	const normalizedId = validated.id;
-	const filePath = getTodoPath(todosDir, normalizedId);
-	if (!existsSync(filePath)) {
-		return { kind: "not_found", id };
-	}
+	const resolved = resolveTodoId(todosDir, id);
+	if ("kind" in resolved) return resolved;
+	const { id: normalizedId, filePath } = resolved;
 
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
@@ -1785,14 +1776,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 				}
 
 				case "get": {
-					if (!params.id) return toolErrorResult(todosDir, "get", { kind: "id_required" });
-					const validated = validateTodoId(params.id);
-					if ("error" in validated) {
-						return toolErrorResult(todosDir, "get", { kind: "invalid_id", id: params.id });
-					}
-					const normalizedId = validated.id;
-					const filePath = getTodoPath(todosDir, normalizedId);
-					const todo = await ensureTodoExists(filePath, normalizedId);
+					const resolved = resolveTodoId(todosDir, params.id);
+					if ("kind" in resolved) return toolErrorResult(todosDir, "get", resolved);
+					const { filePath, id } = resolved;
+					const todo = await ensureTodoExists(filePath, id);
 					if (!todo) {
 						return toolErrorResult(todosDir, "get", { kind: "not_found", id: params.id });
 					}
@@ -1836,16 +1823,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 				}
 
 				case "update": {
-					if (!params.id) return toolErrorResult(todosDir, "update", { kind: "id_required" });
-					const validated = validateTodoId(params.id);
-					if ("error" in validated) {
-						return toolErrorResult(todosDir, "update", { kind: "invalid_id", id: params.id });
-					}
-					const normalizedId = validated.id;
-					const filePath = getTodoPath(todosDir, normalizedId);
-					if (!existsSync(filePath)) {
-						return toolErrorResult(todosDir, "update", { kind: "not_found", id: params.id });
-					}
+					const resolved = resolveTodoId(todosDir, params.id);
+					if ("kind" in resolved) return toolErrorResult(todosDir, "update", resolved);
+					const { id: normalizedId, filePath } = resolved;
 					const { out: result, promo: siblingPromo } = await closeWithPromotion(todosDir, ctx, normalizedId, () =>
 						withTodoLock(todosDir, normalizedId, ctx, async () => {
 							const existing = await ensureTodoExists(filePath, normalizedId);
@@ -1879,16 +1859,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 				}
 
 				case "append": {
-					if (!params.id) return toolErrorResult(todosDir, "append", { kind: "id_required" });
-					const validated = validateTodoId(params.id);
-					if ("error" in validated) {
-						return toolErrorResult(todosDir, "append", { kind: "invalid_id", id: params.id });
-					}
-					const normalizedId = validated.id;
-					const filePath = getTodoPath(todosDir, normalizedId);
-					if (!existsSync(filePath)) {
-						return toolErrorResult(todosDir, "append", { kind: "not_found", id: params.id });
-					}
+					const resolved = resolveTodoId(todosDir, params.id);
+					if ("kind" in resolved) return toolErrorResult(todosDir, "append", resolved);
+					const { id: normalizedId, filePath } = resolved;
 					const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 						const existing = await ensureTodoExists(filePath, normalizedId);
 						if (!existing) return { kind: "not_found", id: params.id };
@@ -1937,13 +1910,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 				}
 
 				case "delete": {
-					if (!params.id) return toolErrorResult(todosDir, "delete", { kind: "id_required" });
-
-					const validated = validateTodoId(params.id);
-					if ("error" in validated) {
-						return toolErrorResult(todosDir, "delete", { kind: "invalid_id", id: params.id });
-					}
-					const result = await deleteTodo(todosDir, validated.id, ctx);
+					const resolved = resolveTodoId(todosDir, params.id);
+					if ("kind" in resolved) return toolErrorResult(todosDir, "delete", resolved);
+					const result = await deleteTodo(todosDir, resolved.id, ctx);
 					if (typeof result === "object" && "kind" in result) {
 						return toolErrorResult(todosDir, "delete", result);
 					}
