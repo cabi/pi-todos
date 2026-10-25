@@ -1455,13 +1455,6 @@ async function ensureTodoExists(filePath: string, id: string): Promise<TodoRecor
 	return readTodoFile(filePath, id);
 }
 
-async function appendTodoBody(filePath: string, todo: TodoRecord, text: string): Promise<TodoRecord> {
-	const spacer = todo.body.trim().length ? "\n\n" : "";
-	todo.body = `${todo.body.replace(/\s+$/, "")}${spacer}${text.trim()}\n`;
-	touchTodo(todo);
-	await writeTodoFile(filePath, todo);
-	return todo;
-}
 
 // v7 single-flight close tracking: when several closes run in parallel (one
 // assistant turn issues five update calls), only the LAST one to finish may
@@ -1510,26 +1503,48 @@ function resolveTodoId(todosDir: string, rawId: string | undefined): ResolvedTod
 	return { id, filePath };
 }
 
+const NO_WRITE = Symbol("no-write");
+
+/**
+ * Apply a mutation to an existing todo under its lock. fn mutates the record in
+ * place — domain fields only — while the gate stamps id/created_at/updated_at,
+ * clears assignments on close, and writes the file. fn returns NO_WRITE to
+ * leave the file untouched (idempotent no-op) or a TodoError to abort without
+ * writing.
+ */
+async function mutateTodo(
+	todosDir: string,
+	id: string,
+	ctx: ExtensionContext,
+	fn: (todo: TodoRecord) => TodoError | typeof NO_WRITE | undefined,
+): Promise<TodoRecord | TodoError> {
+	const resolved = resolveTodoId(todosDir, id);
+	if ("kind" in resolved) return resolved;
+	const { id: normalizedId, filePath } = resolved;
+	return await withTodoLock(todosDir, normalizedId, ctx, async () => {
+		const existing = await ensureTodoExists(filePath, normalizedId);
+		if (!existing) return { kind: "not_found", id };
+		existing.id = normalizedId;
+		if (!existing.created_at) existing.created_at = new Date().toISOString();
+		const outcome = fn(existing);
+		if (outcome === NO_WRITE) return existing;
+		if (outcome && "kind" in outcome) return outcome;
+		clearAssignmentIfClosed(existing);
+		touchTodo(existing);
+		await writeTodoFile(filePath, existing);
+		return existing;
+	});
+}
 async function updateTodoStatus(
 	todosDir: string,
 	id: string,
 	status: string,
 	ctx: ExtensionContext,
 ): Promise<TodoRecord | TodoError> {
-	const resolved = resolveTodoId(todosDir, id);
-	if ("kind" in resolved) return resolved;
-	const { id: normalizedId, filePath } = resolved;
-
-	const { out: result } = await closeWithPromotion(todosDir, ctx, normalizedId, () =>
-		withTodoLock(todosDir, normalizedId, ctx, async () => {
-			const existing = await ensureTodoExists(filePath, normalizedId);
-			if (!existing) return { kind: "not_found", id };
-			existing.status = status;
-			clearAssignmentIfClosed(existing);
-			touchTodo(existing);
-			await writeTodoFile(filePath, existing);
-			return existing;
-		}),
+	const { out: result } = await closeWithPromotion(todosDir, ctx, id, () =>
+		mutateTodo(todosDir, id, ctx, (t) => {
+			t.status = status;
+		})
 	);
 
 	return result;
@@ -1561,16 +1576,15 @@ async function promoteNextOpenTodo(
 
 	const filePath = getTodoPath(todosDir, candidate.id);
 	if (!existsSync(filePath)) return { skipped: "candidate vanished" };
-	const outcome = await withTodoLock(todosDir, candidate.id, ctx, async () => {
-		const existing = await ensureTodoExists(filePath, candidate.id);
-		if (!existing) return { kind: "not_found", detail: "candidate vanished" };
-		if (isTodoClosed(existing.status) || existing.status === "in_progress") return null;
-		existing.status = "in_progress";
-		touchTodo(existing);
-		await writeTodoFile(filePath, existing);
-		return existing;
+	let promoted = false;
+	const outcome = await mutateTodo(todosDir, candidate.id, ctx, (t) => {
+		if (isTodoClosed(t.status) || t.status === "in_progress") return NO_WRITE;
+		t.status = "in_progress";
+		promoted = true;
 	});
-	if (outcome === null) return { skipped: "state changed concurrently" };
+	if (!promoted && !(typeof outcome === "object" && "kind" in outcome)) {
+		return { skipped: "state changed concurrently" };
+	}
 	if (typeof outcome === "object" && "kind" in outcome) return { skipped: outcome.detail ?? outcome.kind };
 	return { id: candidate.id, title: candidate.title };
 }
@@ -1586,17 +1600,12 @@ async function claimTodoAssignment(
 	ctx: ExtensionContext,
 	force = false,
 ): Promise<TodoRecord | TodoError> {
-	const resolved = resolveTodoId(todosDir, id);
-	if ("kind" in resolved) return resolved;
-	const { id: normalizedId, filePath } = resolved;
 	const sessionId = ctx.sessionManager.getSessionId();
-	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
-		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { kind: "not_found", id };
-		if (isTodoClosed(existing.status)) {
+	return await mutateTodo(todosDir, id, ctx, (t) => {
+		if (isTodoClosed(t.status)) {
 			return { kind: "conflict", detail: `Todo ${displayTodoId(id)} is closed` };
 		}
-		const assigned = existing.assigned_to_session;
+		const assigned = t.assigned_to_session;
 		if (assigned && assigned !== sessionId && !force) {
 			return {
 				kind: "conflict",
@@ -1604,14 +1613,11 @@ async function claimTodoAssignment(
 			};
 		}
 		if (assigned !== sessionId) {
-			existing.assigned_to_session = sessionId;
-			touchTodo(existing);
-			await writeTodoFile(filePath, existing);
+			t.assigned_to_session = sessionId;
+			return;
 		}
-		return existing;
+		return NO_WRITE;
 	});
-
-	return result;
 }
 
 async function releaseTodoAssignment(
@@ -1620,30 +1626,18 @@ async function releaseTodoAssignment(
 	ctx: ExtensionContext,
 	force = false,
 ): Promise<TodoRecord | TodoError> {
-	const resolved = resolveTodoId(todosDir, id);
-	if ("kind" in resolved) return resolved;
-	const { id: normalizedId, filePath } = resolved;
 	const sessionId = ctx.sessionManager.getSessionId();
-	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
-		const existing = await ensureTodoExists(filePath, normalizedId);
-		if (!existing) return { kind: "not_found", id };
-		const assigned = existing.assigned_to_session;
-		if (!assigned) {
-			return existing;
-		}
+	return await mutateTodo(todosDir, id, ctx, (t) => {
+		const assigned = t.assigned_to_session;
+		if (!assigned) return NO_WRITE;
 		if (assigned !== sessionId && !force) {
-		return {
-			kind: "conflict",
-			detail: `Todo ${displayTodoId(id)} is assigned to session ${assigned}. Use force to release.`,
-		};
+			return {
+				kind: "conflict",
+				detail: `Todo ${displayTodoId(id)} is assigned to session ${assigned}. Use force to release.`,
+			};
 		}
-		existing.assigned_to_session = undefined;
-		touchTodo(existing);
-		await writeTodoFile(filePath, existing);
-		return existing;
+		t.assigned_to_session = undefined;
 	});
-
-	return result;
 }
 
 async function deleteTodo(
@@ -1697,6 +1691,17 @@ function tuiTodoErrorMessage(err: TodoError): string {
 	}
 }
 
+/** Shape a successful action into a tool result: text plus structured details. */
+function toolAnswer(
+	action: TodoErrorAction,
+	text: string,
+	extra: { todo?: TodoRecord; promoted?: { id: string; title: string } } = {},
+) {
+	return {
+		content: [{ type: "text" as const, text }],
+		details: { action, ...extra },
+	};
+}
 /** Shape an error value into a tool result: rendered text plus the value in details. */
 async function toolErrorResult(todosDir: string, action: TodoErrorAction, err: TodoError) {
 	return {
@@ -1783,10 +1788,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					if (!todo) {
 						return toolErrorResult(todosDir, "get", { kind: "not_found", id: params.id });
 					}
-					return {
-						content: [{ type: "text", text: serializeTodoForAgent(todo) }],
-						details: { action: "get", todo },
-					};
+					return toolAnswer("get", serializeTodoForAgent(todo), { todo });
 				}
 
 				case "create": {
@@ -1816,33 +1818,20 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return toolErrorResult(todosDir, "create", result);
 					}
 
-					return {
-						content: [{ type: "text", text: serializeTodoSummary(todo) }],
-						details: { action: "create", todo },
-					};
+					return toolAnswer("create", serializeTodoSummary(todo), { todo });
 				}
 
 				case "update": {
 					const resolved = resolveTodoId(todosDir, params.id);
 					if ("kind" in resolved) return toolErrorResult(todosDir, "update", resolved);
-					const { id: normalizedId, filePath } = resolved;
+					const { id: normalizedId } = resolved;
 					const { out: result, promo: siblingPromo } = await closeWithPromotion(todosDir, ctx, normalizedId, () =>
-						withTodoLock(todosDir, normalizedId, ctx, async () => {
-							const existing = await ensureTodoExists(filePath, normalizedId);
-							if (!existing) return { kind: "not_found", id: params.id };
-
-							existing.id = normalizedId;
-							if (params.title !== undefined) existing.title = params.title;
-							if (params.status !== undefined) existing.status = params.status;
-							if (params.tags !== undefined) existing.tags = params.tags;
-							if (params.body !== undefined) existing.body = params.body;
-							if (!existing.created_at) existing.created_at = new Date().toISOString();
-							clearAssignmentIfClosed(existing);
-							touchTodo(existing);
-
-							await writeTodoFile(filePath, existing);
-							return existing;
-						}),
+						mutateTodo(todosDir, normalizedId, ctx, (t) => {
+							if (params.title !== undefined) t.title = params.title;
+							if (params.status !== undefined) t.status = params.status;
+							if (params.tags !== undefined) t.tags = params.tags;
+							if (params.body !== undefined) t.body = params.body;
+						})
 					);
 
 					if (typeof result === "object" && "kind" in result) {
@@ -1852,24 +1841,17 @@ export default function todosExtension(pi: ExtensionAPI) {
 					const updatedTodo = result as TodoRecord;
 					const promo = params.status !== undefined && isTodoClosed(updatedTodo.status) ? siblingPromo : null;
 					const text = serializeTodoSummary(updatedTodo) + promotionNote(promo);
-					return {
-						content: [{ type: "text", text }],
-						details: { action: "update", todo: updatedTodo, ...(promo ? { promoted: promo } : {}) },
-					};
+					return toolAnswer("update", text, { todo: updatedTodo, ...(promo ? { promoted: promo } : {}) });
 				}
 
 				case "append": {
 					const resolved = resolveTodoId(todosDir, params.id);
 					if ("kind" in resolved) return toolErrorResult(todosDir, "append", resolved);
-					const { id: normalizedId, filePath } = resolved;
-					const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
-						const existing = await ensureTodoExists(filePath, normalizedId);
-						if (!existing) return { kind: "not_found", id: params.id };
-						if (!params.body || !params.body.trim()) {
-							return existing;
-						}
-						const updated = await appendTodoBody(filePath, existing, params.body);
-						return updated;
+					const { id: normalizedId } = resolved;
+					const result = await mutateTodo(todosDir, normalizedId, ctx, (t) => {
+						if (!params.body || !params.body.trim()) return NO_WRITE;
+						const spacer = t.body.trim().length ? "\n\n" : "";
+						t.body = `${t.body.replace(/\s+$/, "")}${spacer}${params.body.trim()}\n`;
 					});
 
 					if (typeof result === "object" && "kind" in result) {
@@ -1877,10 +1859,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					const updatedTodo = result as TodoRecord;
-					return {
-						content: [{ type: "text", text: serializeTodoSummary(updatedTodo) }],
-						details: { action: "append", todo: updatedTodo },
-					};
+					return toolAnswer("append", serializeTodoSummary(updatedTodo), { todo: updatedTodo });
 				}
 
 				case "claim": {
@@ -1890,10 +1869,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return toolErrorResult(todosDir, "claim", result);
 					}
 					const updatedTodo = result as TodoRecord;
-					return {
-						content: [{ type: "text", text: serializeTodoSummary(updatedTodo) }],
-						details: { action: "claim", todo: updatedTodo },
-					};
+					return toolAnswer("claim", serializeTodoSummary(updatedTodo), { todo: updatedTodo });
 				}
 
 				case "release": {
@@ -1903,10 +1879,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return toolErrorResult(todosDir, "release", result);
 					}
 					const updatedTodo = result as TodoRecord;
-					return {
-						content: [{ type: "text", text: serializeTodoSummary(updatedTodo) }],
-						details: { action: "release", todo: updatedTodo },
-					};
+					return toolAnswer("release", serializeTodoSummary(updatedTodo), { todo: updatedTodo });
 				}
 
 				case "delete": {
@@ -1917,10 +1890,8 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return toolErrorResult(todosDir, "delete", result);
 					}
 
-					return {
-						content: [{ type: "text", text: serializeTodoSummary(result as TodoRecord) }],
-						details: { action: "delete", todo: result as TodoRecord },
-					};
+					const deleted = result as TodoRecord;
+					return toolAnswer("delete", serializeTodoSummary(deleted), { todo: deleted });
 				}
 			}
 		},
