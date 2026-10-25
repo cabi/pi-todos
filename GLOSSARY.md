@@ -21,6 +21,19 @@ the Markdown body. Parsed/serialized by `parseTodoContent`/`serializeTodo`;
 anything reading or writing a todo file goes through this format — there is no
 second representation on disk.
 
+## Status
+
+The canonical status set is the closed union `open | in_progress | closed`
+(`TodoStatus`), and `isTodoClosed(status)` is the single answer to "is this
+todo closed?" — it is a type-checked question, not a convention. Older files
+spell closed as `completed`, `done`, `complete`, `finished` or `cancelled`,
+and open as `pending`/`new`/`created`; `toTodoStatus` canonicalizes all of them
+at the read edge (`parseFrontMatter`), so list ordering, promotion, claiming
+and garbage collection all see the same answer. The next write persists the
+canonical spelling; an unrecognized spelling reads as `open`. Agent input runs
+through the same `STATUS_ALIASES` table in `prepareTodoArguments`, before
+schema validation.
+
 ## Living error
 
 An id error that teaches recovery instead of just failing: it carries a

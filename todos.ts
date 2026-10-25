@@ -65,11 +65,14 @@ const DEFAULT_TODO_SETTINGS = {
 };
 const LOCK_TTL_MS = 30 * 60 * 1000;
 
+/** The canonical status set; toTodoStatus maps every legacy spelling onto one of these. */
+type TodoStatus = "open" | "in_progress" | "closed";
+
 interface TodoFrontMatter {
 	id: string;
 	title: string;
 	tags: string[];
-	status: string;
+	status: TodoStatus;
 	created_at: string;
 	updated_at?: string;
 	closed_at?: string;
@@ -126,14 +129,30 @@ const TodoParams = Type.Object({
 	force: Type.Optional(Type.Boolean({ description: "override another session's claim" })),
 });
 
-// Lean fill-ins: normalize unambiguous aliases before schema validation (via the tool's
-// prepareArguments shim) so the schema can stay minimal. Ambiguous input is left alone —
-// schema validation then reports the allowed values.
-const TODO_STATUS_ALIASES: Record<string, "open" | "in_progress" | "closed"> = {
+// The one status table, shared by both edges: the tool's prepareArguments shim maps agent
+// input through it before schema validation (anything unknown is left untouched so the schema
+// can reject it), and parseFrontMatter maps everything read off disk through toTodoStatus.
+const STATUS_ALIASES: Record<string, TodoStatus> = {
 	completed: "closed",
 	done: "closed",
+	complete: "closed",
+	finished: "closed",
+	cancelled: "closed",
 	"in-progress": "in_progress",
+	active: "in_progress",
+	wip: "in_progress",
+	working: "in_progress",
+	pending: "open",
+	new: "open",
+	created: "open",
 };
+
+/** Canonicalizes any status spelling; unknown values read as open. */
+function toTodoStatus(raw: string | undefined): TodoStatus {
+	const key = (raw ?? "").trim().toLowerCase();
+	if (key === "in_progress" || key === "closed") return key;
+	return STATUS_ALIASES[key] ?? "open";
+}
 
 function prepareTodoArguments(args: unknown): Static<typeof TodoParams> {
 	if (typeof args !== "object" || args === null) return args as Static<typeof TodoParams>;
@@ -144,7 +163,7 @@ function prepareTodoArguments(args: unknown): Static<typeof TodoParams> {
 	}
 	if (typeof params.status === "string") {
 		const status = params.status.trim().toLowerCase();
-		params.status = TODO_STATUS_ALIASES[status] ?? status;
+		params.status = STATUS_ALIASES[status] ?? status;
 	}
 	if (typeof params.tags === "string") params.tags = [params.tags];
 	switch (typeof params.action === "string" ? params.action.trim().toLowerCase() : params.action) {
@@ -312,7 +331,7 @@ async function buildTodoIdError(todosDir: string, id: string, kind: "invalid" | 
 		for (const todo of suggestions) lines.push(`  ${serializeTodoSummary(todo)}`);
 		lines.push("Re-run with the exact id — suggestions are not applied automatically.");
 	} else {
-		const open = sortTodos(todos.filter((t) => !isTodoClosed(getTodoStatus(t))));
+		const open = sortTodos(todos.filter((t) => !isTodoClosed(t.status)));
 		if (open.length) {
 			lines.push("Current open todos:");
 			for (const todo of open.slice(0, 5)) lines.push(`  ${serializeTodoSummary(todo)}`);
@@ -327,12 +346,12 @@ async function buildTodoIdError(todosDir: string, id: string, kind: "invalid" | 
 	return lines.join("\n");
 }
 
-function isTodoClosed(status: string): boolean {
-	return ["closed", "done"].includes(status.toLowerCase());
+function isTodoClosed(status: TodoStatus): boolean {
+	return status === "closed";
 }
 
 function clearAssignmentIfClosed(todo: TodoFrontMatter): void {
-	if (isTodoClosed(getTodoStatus(todo))) {
+	if (isTodoClosed(todo.status)) {
 		todo.assigned_to_session = undefined;
 	}
 }
@@ -343,7 +362,7 @@ function clearAssignmentIfClosed(todo: TodoFrontMatter): void {
  */
 function touchTodo(todo: TodoFrontMatter): void {
 	todo.updated_at = new Date().toISOString();
-	if (isTodoClosed(getTodoStatus(todo))) {
+	if (isTodoClosed(todo.status)) {
 		if (!todo.closed_at) todo.closed_at = todo.updated_at;
 	} else {
 		todo.closed_at = undefined;
@@ -553,7 +572,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 				this.theme.fg("muted", tagText) +
 				assignmentText +
 				" " +
-				this.theme.fg(statusColor, `(${todo.status || "open"})`);
+				this.theme.fg(statusColor, `(${todo.status})`);
 			this.listContainer.addChild(new Text(line, 0, 0));
 		}
 
@@ -841,7 +860,7 @@ class TodoDetailOverlayComponent {
 	}
 
 	private buildMetaLine(width: number): string {
-		const status = this.todo.status || "open";
+		const status = this.todo.status;
 		const statusColor = isTodoClosed(status) ? "dim" : "success";
 		const tagText = this.todo.tags.length ? this.todo.tags.join(", ") : "no tags";
 		const line =
@@ -982,7 +1001,9 @@ function parseFrontMatter(text: string, idFallback: string): TodoFrontMatter {
 		if (!parsed || typeof parsed !== "object") return data;
 		if (typeof parsed.id === "string" && parsed.id) data.id = parsed.id;
 		if (typeof parsed.title === "string") data.title = parsed.title;
-		if (typeof parsed.status === "string" && parsed.status) data.status = parsed.status;
+		// Canonicalize at the single read edge, so every consumer (list, parse, garbage
+		// collection) sees the same answer about whether a todo is closed.
+		data.status = toTodoStatus(typeof parsed.status === "string" ? parsed.status : undefined);
 		if (typeof parsed.created_at === "string") data.created_at = parsed.created_at;
 		if (typeof parsed.updated_at === "string" && parsed.updated_at) data.updated_at = parsed.updated_at;
 		if (typeof parsed.closed_at === "string" && parsed.closed_at) data.closed_at = parsed.closed_at;
@@ -1258,26 +1279,6 @@ function getTodoTitle(todo: TodoFrontMatter): string {
 	return todo.title || "(untitled)";
 }
 
-const STATUS_ALIASES: Record<string, string> = {
-	done: "closed",
-	complete: "closed",
-	completed: "closed",
-	finished: "closed",
-	cancelled: "closed",
-	pending: "open",
-	new: "open",
-	created: "open",
-	active: "in_progress",
-	wip: "in_progress",
-	"in-progress": "in_progress",
-	working: "in_progress",
-};
-
-/** Normalizes legacy/free-form statuses to the canonical open | in_progress | closed set. */
-function getTodoStatus(todo: TodoFrontMatter): string {
-	const raw = (todo.status || "open").trim().toLowerCase();
-	return STATUS_ALIASES[raw] ?? (["open", "in_progress", "closed"].includes(raw) ? raw : "open");
-}
 
 function formatAssignmentSuffix(todo: TodoFrontMatter): string {
 	return todo.assigned_to_session ? ` (assigned: ${todo.assigned_to_session})` : "";
@@ -1317,7 +1318,7 @@ function splitTodosByAssignment(todos: TodoFrontMatter[]): {
 	const openTodos: TodoFrontMatter[] = [];
 	const closedTodos: TodoFrontMatter[] = [];
 	for (const todo of todos) {
-		if (isTodoClosed(getTodoStatus(todo))) {
+		if (isTodoClosed(todo.status)) {
 			closedTodos.push(todo);
 			continue;
 		}
@@ -1353,7 +1354,7 @@ function formatTodoList(todos: TodoFrontMatter[]): string {
 }
 
 function serializeTodoForAgent(todo: TodoRecord): string {
-	const payload = { ...todo, id: formatTodoId(todo.id), status: getTodoStatus(todo) };
+	const payload = { ...todo, id: formatTodoId(todo.id), status: todo.status };
 	return JSON.stringify(payload, null, 2);
 }
 
@@ -1361,7 +1362,7 @@ function serializeTodoForAgent(todo: TodoRecord): string {
 function serializeTodoSummary(todo: TodoFrontMatter): string {
 	const tags = todo.tags.length ? ` #${todo.tags.join(" #")}` : "";
 	const assignment = todo.assigned_to_session ? ` (assigned: ${todo.assigned_to_session})` : "";
-	return `${formatTodoId(todo.id)} [${getTodoStatus(todo)}] ${getTodoTitle(todo)}${tags}${assignment}`;
+	return `${formatTodoId(todo.id)} [${todo.status}] ${getTodoTitle(todo)}${tags}${assignment}`;
 }
 
 function serializeTodoListForAgent(todos: TodoFrontMatter[]): string {
@@ -1381,7 +1382,7 @@ function serializeTodoListForAgent(todos: TodoFrontMatter[]): string {
 }
 
 function renderTodoHeading(theme: Theme, todo: TodoFrontMatter, currentSessionId?: string): string {
-	const closed = isTodoClosed(getTodoStatus(todo));
+	const closed = isTodoClosed(todo.status);
 	const titleColor = closed ? "dim" : "text";
 	const tagText = todo.tags.length ? theme.fg("dim", ` [${todo.tags.join(", ")}]`) : "";
 	const assignmentText = renderAssignmentSuffix(theme, todo, currentSessionId);
@@ -1444,7 +1445,7 @@ function renderTodoDetail(theme: Theme, todo: TodoRecord, expanded: boolean): st
 
 	const lines = [
 		summary,
-		theme.fg("muted", `Status: ${getTodoStatus(todo)}`),
+		theme.fg("muted", `Status: ${todo.status}`),
 		theme.fg("muted", `Tags: ${tags}`),
 		theme.fg("muted", `Created: ${createdAt}`),
 		"",
@@ -1492,7 +1493,7 @@ async function closeWithPromotion(
 		st.active--;
 	}
 	if (st.active > 0 || typeof out === "object" && "kind" in out) return { out, promo: null };
-	const promo = isTodoClosed(String(out.status ?? "")) ? await promoteNextOpenTodo(todosDir, ctx, excludeId) : null;
+	const promo = isTodoClosed(out.status) ? await promoteNextOpenTodo(todosDir, ctx, excludeId) : null;
 	return { out, promo };
 }
 
@@ -1547,7 +1548,7 @@ async function mutateTodo(
 async function updateTodoStatus(
 	todosDir: string,
 	id: string,
-	status: string,
+	status: TodoStatus,
 	ctx: ExtensionContext,
 ): Promise<TodoRecord | TodoError> {
 	const { out: result } = await closeWithPromotion(todosDir, ctx, id, () =>
@@ -1733,10 +1734,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 		try {
 			const todosDir = getTodosDir(ctx.cwd);
 			const todos = await listTodos(todosDir);
-			const open = todos.filter((t) => !isTodoClosed(getTodoStatus(t)));
+			const open = todos.filter((t) => !isTodoClosed(t.status));
 			if (!open.length) return;
 			const lines = open.map(
-				(t) => `  ${formatTodoId(t.id)} [${getTodoStatus(t)}] ${getTodoTitle(t)}`,
+				(t) => `  ${formatTodoId(t.id)} [${t.status}] ${getTodoTitle(t)}`,
 			);
 			pi.sendMessage({
 				customType: "todo-status",

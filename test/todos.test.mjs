@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Functionality tests for todos.ts (68 tests: lifecycle, timestamps, GC, locks, compaction re-injection, v7 auto-promotion).
+// Functionality tests for todos.ts (77 tests: lifecycle, timestamps, GC, locks, compaction re-injection, v7 auto-promotion).
 // Transpiles the extension with tsc, loads it with a mock pi, and drives the real tool execute(). Run: node test/todos.test.mjs
 import { execSync, spawn } from "node:child_process";
 import fs from "node:fs";
@@ -437,6 +437,61 @@ console.log("\n== #9 living id errors: diagnose, suggest, roster, hint ==");
 	check("tui: not found line", line2 === "Error: todo TODO-00112233 not found", line2);
 	check("tool: not found keeps living error", r2.text.startsWith("Error: todo TODO-00112233 not found."), r2.text);
 }
+}
+// ---------- #11 legacy statuses: one closed-knower, canonicalized at the read edge ----------
+{
+	fs.rmSync(todosDir, { recursive: true, force: true });
+	fs.mkdirSync(todosDir, { recursive: true });
+	const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
+	// Files on disk as older versions wrote them: closed spelled as a legacy alias.
+	const mk = (id, status, ageDays) =>
+		fs.writeFileSync(
+			path.join(todosDir, `${id}.md`),
+			`${JSON.stringify({ id, title: `legacy ${status}`, tags: [], status, created_at: days(ageDays) }, null, 2)}\n\nbody\n`,
+		);
+	mk("aaaa0001", "completed", 0.001);
+	mk("aaaa0002", "cancelled", 0.002);
+	mk("aaaa0003", "open", 0.003);
+
+	// read edge: a legacy spelling is closed everywhere, not just in the rendered label
+	const listAll = (await call({ action: "list-all" })).text;
+	const listOpen = (await call({ action: "list" })).text;
+	check("legacy completed lists as closed", listAll.includes("TODO-aaaa0001 [closed]"), listAll);
+	check("legacy cancelled lists as closed", listAll.includes("TODO-aaaa0002 [closed]"), listAll);
+	check("legacy closed excluded from the open list", !listOpen.includes("TODO-aaaa0001") && !listOpen.includes("TODO-aaaa0002"), listOpen);
+
+	// claim refuses a legacy-closed todo (it used to be silently claimable)
+	const claim = await call({ action: "claim", id: "TODO-aaaa0001" });
+	check("claim refuses legacy closed", /is closed/.test(claim.text) && !readTodo("aaaa0001").fm.assigned_to_session, claim.text);
+
+	// promotion skips legacy-closed todos even though they sort before the real open one
+	const fresh = idFromSummary((await call({ action: "create", title: "canon open" })).text);
+	await call({ action: "update", id: fresh, status: "closed" });
+	check(
+		"promotion skips legacy closed, picks the real open todo",
+		readTodo("aaaa0003").fm.status === "in_progress" && readTodo("aaaa0001").fm.status === "completed" && readTodo("aaaa0002").fm.status === "cancelled",
+	);
+
+	// write edge: the next mutation persists the canonical spelling
+	await call({ action: "update", id: "TODO-aaaa0002", title: "renamed" });
+	check("write-back canonicalizes a closed alias", readTodo("aaaa0002").fm.status === "closed", JSON.stringify(readTodo("aaaa0002").fm));
+
+	// unknown spellings read as open and heal on the next write
+	mk("aaaa0004", "blocked", 0.004);
+	check("unknown status reads as open", (await call({ action: "get", id: "TODO-aaaa0004" })).text.includes('"status": "open"'));
+	await call({ action: "append", id: "TODO-aaaa0004", body: "more" });
+	check("unknown status heals on write", readTodo("aaaa0004").fm.status === "open", JSON.stringify(readTodo("aaaa0004").fm));
+
+	// GC: a legacy-closed todo is now collectible, aged by created_at
+	const gcDir = fs.mkdtempSync("/tmp/todos-gc-legacy-");
+	const gcTodos = path.join(gcDir, ".pi", "todos");
+	fs.mkdirSync(gcTodos, { recursive: true });
+	fs.writeFileSync(
+		path.join(gcTodos, "bbbb0001.md"),
+		`${JSON.stringify({ id: "bbbb0001", title: "legacy completed", tags: [], status: "completed", created_at: days(8) }, null, 2)}\n\nbody\n`,
+	);
+	await pi.handlers.session_start[0]({}, { cwd: gcDir });
+	check("GC collects a legacy completed todo", !fs.existsSync(path.join(gcTodos, "bbbb0001.md")));
 }
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);
