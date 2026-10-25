@@ -1,4 +1,28 @@
 # Changelog
+## 1.2.1 (2026-10-25)
+
+- **One closed-knower** — `status` is now the closed union
+  `open | in_progress | closed` and `isTodoClosed` is a plain equality, so the
+  question "is this todo closed?" is type-checked instead of conventional. One
+  `STATUS_ALIASES` table serves both edges: `toTodoStatus` canonicalizes
+  everything read off disk inside `parseFrontMatter` (list, parse, garbage
+  collection), and the same table normalizes agent input before schema
+  validation. `getTodoStatus` and its duplicate alias table are gone; the 15
+  raw `isTodoClosed` call sites were corrected by typing the field, without
+  being touched.
+- **Behaviour change, deliberate**: todos whose files spell closed as
+  `completed`, `finished`, `cancelled`, `complete`, `done` (and open as
+  `pending`/`new`/`created`) are now genuinely closed everywhere. Previously
+  they rendered as `[closed]` yet sorted as open, were auto-promoted to
+  `in_progress` by v7, accepted claims, and could never be garbage collected.
+- **Migration notes** — unrecognized status spellings read as `open` and are
+  rewritten in canonical form on the next mutation (one-time on-disk heal).
+  Legacy closed todos become garbage-collectible, aged from `created_at` when
+  `closed_at` is absent, so the first `session_start` after upgrading may
+  remove old completed todos that were previously immortal.
+- Tests: new `#11 legacy statuses` section (9 checks) covering listing,
+  claim refusal, promotion skip, write-back canonicalization, the unknown-status
+  heal, and GC of a legacy closed todo; 77 tests total.
 
 ## 1.2.0 (2026-10-25)
 
