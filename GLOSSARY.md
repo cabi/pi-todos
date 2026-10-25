@@ -32,7 +32,7 @@ at the read edge (`parseFrontMatter`), so list ordering, promotion, claiming
 and garbage collection all see the same answer. The next write persists the
 canonical spelling; an unrecognized spelling reads as `open`. Agent input runs
 through the same `STATUS_ALIASES` table in `prepareTodoArguments`, before
-schema validation.
+schema validation. Why it works this way: ADR-0001.
 
 ## Living error
 
