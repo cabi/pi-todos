@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Functionality tests for todos.ts (52 tests: lifecycle, timestamps, GC, locks, compaction re-injection, v7 auto-promotion).
+// Functionality tests for todos.ts (68 tests: lifecycle, timestamps, GC, locks, compaction re-injection, v7 auto-promotion).
 // Transpiles the extension with tsc, loads it with a mock pi, and drives the real tool execute(). Run: node test/todos.test.mjs
 import { execSync, spawn } from "node:child_process";
 import fs from "node:fs";
@@ -411,6 +411,31 @@ console.log("\n== #9 living id errors: diagnose, suggest, roster, hint ==");
 	fs.rmSync(todosDir, { recursive: true, force: true });
 	const r6 = await call({ action: "get", id: "TODO-deadbeef" });
 	check("empty store: hint to create", r6.text.includes("The todo store is empty") && r6.text.includes("todo create"), r6.text);
+
+// ---------- #10 error values: structured details + single TUI prefix ----------
+{
+	const theme = { fg: (_c, s) => s, bold: (s) => s };
+	fs.mkdirSync(todosDir, { recursive: true });
+	await call({ action: "create", title: "EV struct task" });
+
+	// invalid id → details carries the structured value, not prose
+	const r = await call({ action: "update", id: "TODO-zzzz99zz", status: "closed" });
+	check("error value: details carries kind", r.res.details?.error?.kind === "invalid_id" && r.res.details.error.id === "TODO-zzzz99zz", JSON.stringify(r.res.details));
+
+	// renderResult derives its own line from the value: exactly one "Error:" prefix
+	const rendered = tool.renderResult(r.res, { expanded: false, isPartial: false }, theme);
+	const lines = rendered.render(200);
+	const line = (Array.isArray(lines) ? lines.join("\n") : String(lines)).trim();
+	const prefixes = line.match(/Error:/g) ?? [];
+	check("tui: renders one short line, single prefix", line === "Error: invalid todo id: TODO-zzzz99zz" && prefixes.length === 1, line);
+
+	// not_found value → TUI names the todo; tool channel keeps the living error
+	const r2 = await call({ action: "get", id: "TODO-00112233" });
+	check("not found: value kind", r2.res.details?.error?.kind === "not_found", JSON.stringify(r2.res.details?.error));
+	const line2 = tool.renderResult(r2.res, { expanded: false, isPartial: false }, theme).render(200).join("\n").trim();
+	check("tui: not found line", line2 === "Error: todo TODO-00112233 not found", line2);
+	check("tool: not found keeps living error", r2.text.startsWith("Error: todo TODO-00112233 not found."), r2.text);
+}
 }
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail ? 1 : 0);
