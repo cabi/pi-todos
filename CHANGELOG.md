@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.0 (2026-10-25)
+
+- **Action gate** — the `todo` tool's nine cases now flow through a deep
+  action gate instead of per-case ceremony: `resolveTodoId` (id present,
+  well-formed, file exists), `mutateTodo` (lock, stamp, write — the mutation
+  protocol can no longer be done wrong by a caller), and `toolAnswer`
+  (uniform success results). `buildTodoIdError` call sites drop from 16 to 3;
+  the file shrinks by ~90 lines while gaining the structure.
+- **Errors as values** — a `TodoError` value (`kind` + payload, no prose)
+  flows from every failure site; two renderers own all wording: the agent
+  tool channel keeps the byte-identical living-error text, the TUI renders
+  one short line. Fixes a shipped bug where the TUI showed `Error: Error: …`
+  twice, and a latent one where TUI error notifications were dead code
+  (`"error" in` never matched) — release/delete/close failures now surface.
+- **Strict typecheck against pi 1.4.0** — `npm run typecheck` compiles
+  `todos.ts` with `--strict --noEmit` against the installed pi release; it is
+  chained into `npm test`, and the test harness resolves the newest installed
+  release instead of pinning one. pi 1.4.0's `KeybindingsManager` is adapted
+  to the components' matcher shape at the boundary.
+- **GLOSSARY.md** — settles the domain and architecture vocabulary (todo
+  store, front matter, living error, promotion, assignment, action gate).
+- Dead code dropped: `listTodosSync`, `displayId`, no-op `invalidate`
+  overrides.
+
 ## 1.1.0 (2026-10-19)
 
 - **Living id errors** — every invalid or unknown todo id now returns a
