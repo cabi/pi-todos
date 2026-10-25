@@ -8,7 +8,17 @@ import os from "node:os";
 import { pathToFileURL } from "node:url";
 
 const TSC = process.env.TSC_BIN ?? "tsc";
-const PI_NM = process.env.PI_NM ?? path.join(os.homedir(), ".pi/agent/install/releases/1.3.0/node_modules");
+const piReleasesDir = path.join(os.homedir(), ".pi/agent/install/releases");
+const latestPiRelease = fs
+	.readdirSync(piReleasesDir)
+	.filter((d) => /^\d+\.\d+\.\d+$/.test(d))
+	.sort((a, b) => {
+		const [a0, a1, a2] = a.split(".").map(Number);
+		const [b0, b1, b2] = b.split(".").map(Number);
+		return a0 - b0 || a1 - b1 || a2 - b2;
+	})
+	.pop();
+const PI_NM = process.env.PI_NM ?? path.join(piReleasesDir, latestPiRelease ?? "1.4.0", "node_modules");
 const SRC = process.env.TODOS_TS ?? new URL("../todos.ts", import.meta.url).pathname;
 
 const work = fs.mkdtempSync("/tmp/todos-v5-");
