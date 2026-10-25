@@ -34,7 +34,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import crypto from "node:crypto";
 import {
 	Container,
@@ -642,9 +642,6 @@ class TodoActionMenuComponent extends Container {
 		this.selectList.handleInput(keyData);
 	}
 
-	override invalidate(): void {
-		super.invalidate();
-	}
 }
 
 class TodoDeleteConfirmComponent extends Container {
@@ -681,10 +678,6 @@ class TodoDeleteConfirmComponent extends Container {
 
 	handleInput(keyData: string): void {
 		this.selectList.handleInput(keyData);
-	}
-
-	override invalidate(): void {
-		super.invalidate();
 	}
 }
 
@@ -1228,38 +1221,6 @@ async function listTodos(todosDir: string): Promise<TodoFrontMatter[]> {
 	return sortTodos(todos);
 }
 
-function listTodosSync(todosDir: string): TodoFrontMatter[] {
-	let entries: string[] = [];
-	try {
-		entries = readdirSync(todosDir);
-	} catch {
-		return [];
-	}
-
-	const todos: TodoFrontMatter[] = [];
-	for (const entry of entries) {
-		if (!entry.endsWith(".md")) continue;
-		const id = entry.slice(0, -3);
-		const filePath = path.join(todosDir, entry);
-		try {
-			const content = readFileSync(filePath, "utf8");
-			const { frontMatter } = splitFrontMatter(content);
-			const parsed = parseFrontMatter(frontMatter, id);
-			todos.push({
-				id,
-				title: parsed.title,
-				tags: parsed.tags ?? [],
-				status: parsed.status,
-				created_at: parsed.created_at,
-				assigned_to_session: parsed.assigned_to_session,
-			});
-		} catch {
-			// ignore
-		}
-	}
-
-	return sortTodos(todos);
-}
 
 function getTodoTitle(todo: TodoFrontMatter): string {
 	return todo.title || "(untitled)";
@@ -1788,7 +1749,6 @@ export default function todosExtension(pi: ExtensionAPI) {
 						};
 					}
 					const normalizedId = validated.id;
-					const displayId = formatTodoId(normalizedId);
 					const filePath = getTodoPath(todosDir, normalizedId);
 					const todo = await ensureTodoExists(filePath, normalizedId);
 					if (!todo) {
