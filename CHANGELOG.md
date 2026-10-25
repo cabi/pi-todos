@@ -1,4 +1,21 @@
 # Changelog
+## 1.2.2 (2026-10-25)
+
+- **One door for the store** — `readStore` is now the only place the todo
+  directory is walked and front matter decoded into records. Garbage collection
+  reads through it instead of running its own `readdir` + `readFile` +
+  `parseFrontMatter` loop, so GC and listing can no longer disagree about
+  whether a file exists, parses, or is closed. Promotion, the id-error roster,
+  the compaction re-injection and the `/todos` command read through it too.
+- **Bodies stop leaking into tool details** — `frontMatterOf` projects a record
+  down to its front matter at the boundaries that must stay lean (`list` /
+  `list-all` details, compaction re-injection). A todo body now reaches exactly
+  one consumer: `get`.
+- No agent-facing text changes; `todos.ts` shrinks by 34 lines. Five new tests
+  cover the door — an unreadable entry is skipped rather than fatal, listing and
+  GC skip the same entry, details carry no body, and bodies still reach single
+  reads. 82 tests total.
+
 ## 1.2.1 (2026-10-25)
 
 - **One closed-knower** — `status` is now the closed union

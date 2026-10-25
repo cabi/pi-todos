@@ -1,6 +1,6 @@
 {
 	"name": "pi-todos",
-	"version": "1.2.1",
+	"version": "1.2.2",
 	"description": "File-backed todo tool for the pi coding agent \u2014 durable Markdown todo files with pid-locking, garbage collection, compaction re-injection, and single-flight auto-promotion.",
 	"keywords": [
 		"pi-package",
