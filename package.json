@@ -29,7 +29,7 @@
 		"node": ">=18"
 	},
 	"scripts": {
-		"test": "node test/todos.test.mjs",
+		"test": "npm run typecheck && node test/todos.test.mjs",
 		"typecheck": "node scripts/typecheck.mjs"
 	},
 	"pi": {
