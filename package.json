@@ -29,7 +29,8 @@
 		"node": ">=18"
 	},
 	"scripts": {
-		"test": "node test/todos.test.mjs"
+		"test": "node test/todos.test.mjs",
+		"typecheck": "node scripts/typecheck.mjs"
 	},
 	"pi": {
 		"extensions": [

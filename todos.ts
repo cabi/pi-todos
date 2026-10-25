@@ -51,6 +51,7 @@ import {
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
+	type KeybindingsManager,
 } from "@earendil-works/pi-tui";
 
 const TODO_DIR_NAME = ".pi/todos";
@@ -89,6 +90,14 @@ interface LockInfo {
 interface TodoSettings {
 	gc: boolean;
 	gcDays: number;
+}
+
+/** Adapt pi's KeybindingsManager to the components' loose matcher shape (strict function types). */
+function toKeybindingMatcher(keybindings: KeybindingsManager): KeybindingMatcher {
+	return {
+		matches: (keyData: string, keybindingId: string) =>
+			keybindings.matches(keyData, keybindingId as Parameters<KeybindingsManager["matches"]>[1]),
+	};
 }
 
 type KeybindingMatcher = {
@@ -889,7 +898,7 @@ function getTodoSettingsPath(todosDir: string): string {
 
 function normalizeTodoSettings(raw: Partial<TodoSettings>): TodoSettings {
 	const gc = raw.gc ?? DEFAULT_TODO_SETTINGS.gc;
-	const gcDays = Number.isFinite(raw.gcDays) ? raw.gcDays : DEFAULT_TODO_SETTINGS.gcDays;
+	const gcDays = raw.gcDays !== undefined && Number.isFinite(raw.gcDays) ? raw.gcDays : DEFAULT_TODO_SETTINGS.gcDays;
 	return {
 		gc: Boolean(gc),
 		gcDays: Math.max(0, Math.floor(gcDays)),
@@ -1467,16 +1476,16 @@ const closeFlights = new Map<string, { active: number }>();
  * todosDir — performs the vacancy promotion. Returns the write result plus the
  * promotion outcome (null for all but the last finisher).
  */
-async function closeWithPromotion<T extends { status?: string }>(
+async function closeWithPromotion(
 	todosDir: string,
 	ctx: ExtensionContext,
 	excludeId: string,
-	closeWrite: () => Promise<T>,
-): Promise<{ out: T; promo: { id: string; title: string } | { skipped: string } | null }> {
+	closeWrite: () => Promise<TodoRecord | TodoError>,
+): Promise<{ out: TodoRecord | TodoError; promo: { id: string; title: string } | { skipped: string } | null }> {
 	const st = closeFlights.get(todosDir) ?? { active: 0 };
 	closeFlights.set(todosDir, st);
 	st.active++;
-	let out: T;
+	let out: TodoRecord | TodoError;
 	try {
 		out = await closeWrite();
 	} finally {
@@ -1521,7 +1530,7 @@ async function mutateTodo(
 	const resolved = resolveTodoId(todosDir, id);
 	if ("kind" in resolved) return resolved;
 	const { id: normalizedId, filePath } = resolved;
-	return await withTodoLock(todosDir, normalizedId, ctx, async () => {
+	return await withTodoLock(todosDir, normalizedId, ctx, async (): Promise<TodoRecord | TodoError> => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
 		if (!existing) return { kind: "not_found", id };
 		existing.id = normalizedId;
@@ -1649,7 +1658,7 @@ async function deleteTodo(
 	if ("kind" in resolved) return resolved;
 	const { id: normalizedId, filePath } = resolved;
 
-	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
+	const result = await withTodoLock(todosDir, normalizedId, ctx, async (): Promise<TodoRecord | TodoError> => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
 		if (!existing) return { kind: "not_found", id };
 		await fs.unlink(filePath);
@@ -1839,9 +1848,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					const updatedTodo = result as TodoRecord;
-					const promo = params.status !== undefined && isTodoClosed(updatedTodo.status) ? siblingPromo : null;
-					const text = serializeTodoSummary(updatedTodo) + promotionNote(promo);
-					return toolAnswer("update", text, { todo: updatedTodo, ...(promo ? { promoted: promo } : {}) });
+					const sibling = params.status !== undefined && isTodoClosed(updatedTodo.status) ? siblingPromo : null;
+					const promoted = sibling && !("skipped" in sibling) ? sibling : null;
+					const text = serializeTodoSummary(updatedTodo) + promotionNote(sibling);
+					return toolAnswer("update", text, { todo: updatedTodo, ...(promoted ? { promoted } : {}) });
 				}
 
 				case "append": {
@@ -1942,7 +1952,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 				return new Text(text?.type === "text" ? text.text : "", 0, 0);
 			}
 
-			let text = renderTodoDetail(theme, details.todo, expanded);
+			let text = renderTodoDetail(theme, details.todo!, expanded);
 			const actionLabel =
 				details.action === "create"
 					? "Created"
@@ -1984,7 +1994,10 @@ export default function todosExtension(pi: ExtensionAPI) {
 			}
 
 			let nextPrompt: string | null = null;
-			let rootTui: TUI | null = null;
+let rootTui: TUI | null = null;
+			const requestRootRender = (): void => {
+				rootTui?.requestRender();
+			};
 			await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
 				rootTui = tui;
 				let selector: TodoSelectorComponent | null = null;
@@ -2061,7 +2074,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 							new TodoDetailOverlayComponent(
 								overlayTui,
 								overlayTheme,
-								overlayKeybindings,
+								toKeybindingMatcher(overlayKeybindings),
 								record,
 								overlayDone,
 							),
@@ -2104,8 +2117,8 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					if (action === "release") {
 						const result = await releaseTodoAssignment(todosDir, record.id, ctx, true);
-						if ("error" in result) {
-							ctx.ui.notify(tuiTodoErrorMessage(result.error), "error");
+						if ("kind" in result) {
+							ctx.ui.notify(tuiTodoErrorMessage(result), "error");
 							return "stay";
 						}
 						const updatedTodos = await listTodos(todosDir);
@@ -2116,8 +2129,8 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					if (action === "delete") {
 						const result = await deleteTodo(todosDir, record.id, ctx);
-						if ("error" in result) {
-							ctx.ui.notify(tuiTodoErrorMessage(result.error), "error");
+						if ("kind" in result) {
+							ctx.ui.notify(tuiTodoErrorMessage(result), "error");
 							return "stay";
 						}
 						const updatedTodos = await listTodos(todosDir);
@@ -2128,8 +2141,8 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					const nextStatus = action === "close" ? "closed" : "open";
 					const result = await updateTodoStatus(todosDir, record.id, nextStatus, ctx);
-					if ("error" in result) {
-						ctx.ui.notify(tuiTodoErrorMessage(result.error), "error");
+					if ("kind" in result) {
+						ctx.ui.notify(tuiTodoErrorMessage(result), "error");
 						return "stay";
 					}
 
@@ -2200,7 +2213,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 				selector = new TodoSelectorComponent(
 					tui,
 					theme,
-					keybindings,
+					toKeybindingMatcher(keybindings),
 					todos,
 					(todo) => {
 						void handleSelect(todo);
@@ -2246,7 +2259,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 			if (nextPrompt) {
 				ctx.ui.setEditorText(nextPrompt);
-				rootTui?.requestRender();
+				requestRootRender();
 			}
 		},
 	});
